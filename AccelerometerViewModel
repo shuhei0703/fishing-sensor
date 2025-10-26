@@ -1,0 +1,294 @@
+import SwiftUI
+import CoreMotion
+import AVFoundation
+
+@Observable
+class AccelerometerViewModel: ObservableObject {
+    private var motionManager = CMMotionManager()
+    private var audioPlayer: AVAudioPlayer?
+    private var audioPlayer2: AVAudioPlayer?
+    private var audioPlayer3: AVAudioPlayer?
+
+    var accelerationData: [(z: Double, time: Double)] = []
+    var threshold: Double = 0.15 // デフォルト値を0.25に設定
+    var warningThreshold: Double = 10.00 // デフォルト値を1.00に設定
+    var isMeasuring: Bool = false
+    var isPaused: Bool = false
+    var elapsedTime: Double = 0.0
+    var shouldShowAlert: Bool = false
+    var isAutoAdjusting: Bool = false
+    var isFileSaveButtonVisible: Bool = false
+    // アタリ検知時刻のリスト
+    var hitTimestamps: [String] = []// ファイル保存ボタンの表示状態
+
+    // 設定関連
+    var audioVolume: Float = 1.0
+    var screenBrightness: CGFloat = UIScreen.main.brightness
+    var currentLanguage: String = "日本語"
+
+    private var startTime: Date?
+    private var timer: Timer?
+    private var pauseTime: Double = 0.0
+    private var initialZValue: Double?
+    private let maxDataPoints = 3000
+    private var tempMaxAcceleration: Double = 0.0
+    private var lastHitTimestamp: Date?
+
+    init() {
+        setupAudioSession()
+        prepareSound()
+    }
+
+    private func setupAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to set audio session category.")
+        }
+    }
+
+    private func prepareSound() {
+        if let soundURL = Bundle.main.url(forResource: "alert", withExtension: "mp3") {
+            do {
+                audioPlayer = try AVAudioPlayer(contentsOf: soundURL)
+                audioPlayer?.prepareToPlay()
+                audioPlayer?.volume = audioVolume
+            } catch {
+                print("Error loading sound file: \(error.localizedDescription)")
+            }
+        }
+
+        if let soundURL2 = Bundle.main.url(forResource: "alert2", withExtension: "mp3") {
+            do {
+                audioPlayer2 = try AVAudioPlayer(contentsOf: soundURL2)
+                audioPlayer2?.prepareToPlay()
+                audioPlayer2?.volume = audioVolume
+            } catch {
+                print("Error loading second sound file: \(error.localizedDescription)")
+            }
+        }
+
+        if let soundURL3 = Bundle.main.url(forResource: "alert3", withExtension: "mp3") {
+            do {
+                audioPlayer3 = try AVAudioPlayer(contentsOf: soundURL3)
+                audioPlayer3?.prepareToPlay()
+                audioPlayer3?.volume = audioVolume
+            } catch {
+                print("Error loading third sound file: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func startMeasurement() {
+        if motionManager.isDeviceMotionAvailable {
+            motionManager.deviceMotionUpdateInterval = 0.1
+            motionManager.startDeviceMotionUpdates(to: OperationQueue()) { [weak self] (motion, error) in
+                guard let self = self, let motion = motion else { return }
+
+                let time = Date().timeIntervalSince(self.startTime ?? Date()) + self.pauseTime
+                let z = -motion.userAcceleration.z // 符号を逆にするために - を追加
+
+                if self.initialZValue == nil {
+                    self.initialZValue = z
+                }
+
+                let adjustedZ = z - (self.initialZValue ?? 0)
+
+                DispatchQueue.main.async {
+                    self.accelerationData.append((z: adjustedZ, time: time))
+                    if self.accelerationData.count > self.maxDataPoints {
+                        self.accelerationData.removeFirst()
+                    }
+
+                    if abs(adjustedZ) > self.warningThreshold {
+                        self.playThirdSound()
+                        self.pauseMeasurement()
+                        self.shouldShowAlert = true
+                        return
+                    }
+
+                    if self.isAutoAdjusting {
+                        self.tempMaxAcceleration = max(self.tempMaxAcceleration, abs(adjustedZ))
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    if abs(adjustedZ) > self.threshold {
+                        let now = Date()
+                        if self.lastHitTimestamp == nil || now.timeIntervalSince(self.lastHitTimestamp!) > 2.0 {
+                            // ◯分◯秒のテキストを生成
+                            let minutes = Int(self.elapsedTime) / 60
+                            let seconds = Int(self.elapsedTime) % 60
+                            let hitMessage = "\(minutes)分\(seconds)秒に反応あり"
+                            
+                            self.hitTimestamps.append(hitMessage)
+                            
+                            // 2行制限（古いものを削除）
+                            if self.hitTimestamps.count > 2 {
+                                self.hitTimestamps.removeFirst()
+                            }
+                            
+                            // 最後に記録した時刻を更新
+                            self.lastHitTimestamp = now
+                        }
+                        
+                        self.playSoundWithHighFrequency()
+                        self.triggerFlash()
+                    }
+                }
+            }
+        }
+
+        self.startTime = Date()
+        self.timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+            DispatchQueue.main.async {
+                self.elapsedTime = Date().timeIntervalSince(self.startTime ?? Date()) + self.pauseTime
+            }
+        }
+
+        self.isMeasuring = true
+        self.isPaused = false
+    }
+
+    func pauseMeasurement() {
+        motionManager.stopDeviceMotionUpdates()
+        timer?.invalidate()
+        timer = nil
+        self.pauseTime = self.elapsedTime
+        self.isMeasuring = false
+        self.isPaused = true
+        self.isAutoAdjusting = false
+    }
+
+    func resetMeasurement() {
+        motionManager.stopDeviceMotionUpdates()
+        timer?.invalidate()
+        timer = nil
+        self.accelerationData = []             // データはリセットする
+        self.elapsedTime = 0.0
+        self.pauseTime = 0.0
+        self.isMeasuring = false
+        self.isPaused = false                   // 停止中の画面を維持する
+        self.shouldShowAlert = false
+        self.isAutoAdjusting = false
+        self.initialZValue = nil
+        self.hitTimestamps = []
+    }
+    func resumeMeasurement() {
+        let roundedPauseTime = ceil(self.pauseTime)
+        self.pauseTime = roundedPauseTime
+
+        self.startTime = Date()
+        self.isPaused = false
+        self.startMeasurement()
+    }
+
+    func startAutoAdjustment() {
+        self.isAutoAdjusting = true
+        self.tempMaxAcceleration = 0.0
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self = self else { return }
+            if self.isAutoAdjusting {
+                self.isAutoAdjusting = false
+                self.threshold = self.tempMaxAcceleration * 3.0
+            }
+        }
+    }
+    
+    func fullReset() {
+        motionManager.stopDeviceMotionUpdates()
+        timer?.invalidate()
+        timer = nil
+        self.accelerationData = []
+        self.elapsedTime = 0.0
+        self.pauseTime = 0.0
+        self.isMeasuring = false
+        self.isPaused = false // ← ホーム画面に戻すには false
+        self.shouldShowAlert = false
+        self.isAutoAdjusting = false
+        self.initialZValue = nil
+        self.hitTimestamps = []
+    }
+
+    func applySettings(language: String) {
+        // 言語設定を反映
+        currentLanguage = language
+        // 音量を更新
+        updateVolume()
+    }
+
+    private func updateVolume() {
+        audioPlayer?.volume = audioVolume
+        audioPlayer2?.volume = audioVolume
+        audioPlayer3?.volume = audioVolume
+    }
+
+    /*private func playSoundWithHighFrequency() {
+        if audioPlayer?.isPlaying == true {
+            audioPlayer?.stop()
+            audioPlayer?.currentTime = 0
+        }
+        audioPlayer?.play()
+    }*/
+    
+    private func playSoundWithHighFrequency() {
+        // すでに他の音が再生中なら、何もせず待つ
+        if audioPlayer?.isPlaying == true || audioPlayer2?.isPlaying == true || audioPlayer3?.isPlaying == true {
+            return
+        }
+        audioPlayer?.play()
+    }
+
+    /*private func playSecondSound() {
+        if audioPlayer2?.isPlaying == true {
+            audioPlayer2?.stop()
+            audioPlayer2?.currentTime = 0
+        }
+        audioPlayer2?.play()
+    }*/
+    private func playSecondSound() {
+        // すでに他の音が再生中なら、何もせず待つ
+        if audioPlayer?.isPlaying == true || audioPlayer2?.isPlaying == true || audioPlayer3?.isPlaying == true {
+            return
+        }
+        audioPlayer2?.play()
+    }
+    
+    // アタリ時刻を記録
+    private func recordHitTime() {
+        let minutes = Int(elapsedTime) / 60
+        let seconds = Int(elapsedTime) % 60
+        let timestamp = "\(minutes)分\(seconds)秒にアタリを検知"
+        hitTimestamps.append(timestamp)
+        
+        // 最新5件だけ保持
+        if hitTimestamps.count > 5 {
+            hitTimestamps.removeFirst()
+        }
+    }
+
+    /*private func playThirdSound() {
+        if audioPlayer3?.isPlaying == true {
+            audioPlayer3?.stop()
+            audioPlayer3?.currentTime = 0
+        }
+        audioPlayer3?.play()
+    }*/
+    private func playThirdSound() {
+        // すでに他の音が再生中なら、何もせず待つ
+        if audioPlayer?.isPlaying == true || audioPlayer2?.isPlaying == true || audioPlayer3?.isPlaying == true {
+            return
+        }
+        audioPlayer3?.play()
+    }
+
+    private func triggerFlash() {
+        NotificationCenter.default.post(name: .flashScreen, object: nil)
+    }
+}
+
+extension Notification.Name {
+    static let flashScreen = Notification.Name("flashScreen")
+}
