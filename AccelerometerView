@@ -1,0 +1,418 @@
+//
+//  AccelerometerView.swift
+//  test sound
+//
+//  Created by 齋藤秀平 on 2024/12/22.
+//
+
+import SwiftUI
+import Charts
+import AppTrackingTransparency
+import AdSupport
+import GoogleMobileAds
+// import StoreKit  // ← 削除
+
+struct AccelerometerView: View {
+    @StateObject private var viewModel = AccelerometerViewModel()
+    @State private var isSettingsPresented = false
+    @EnvironmentObject var languageManager: AppLanguageManager
+    // @EnvironmentObject var subManager: SubscriptionManager  // ← 削除
+    @State private var flashOpacity: Double = 0.0
+    @State private var isSharing = false
+    @State private var sharedURL: URL?
+    @State private var isUserGuidePresented = false // 使用方法PDF表示用
+    // @State private var isSubscriptionPresented = false   // ← 削除
+    
+    private var isDayTime: Bool {
+        let hour = Calendar.current.component(.hour, from: Date())
+        return hour >= 6 && hour < 18
+    }
+    
+    private var backgroundImageName: String {
+        isDayTime ? "background1" : "background2"
+    }
+    
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // 背景画像
+                Image(viewModel.isMeasuring || viewModel.isPaused ? backgroundImageName : "start")
+                    .resizable()
+                
+                // フラッシュのオーバーレイ
+                Color.white
+                    .opacity(flashOpacity)
+                    .animation(.easeInOut(duration: 0.1), value: flashOpacity)
+                    .edgesIgnoringSafeArea(.all)
+                
+                VStack(spacing: geo.size.height * 0.02) {
+                    if !viewModel.isMeasuring && !viewModel.isPaused && viewModel.accelerationData.isEmpty {
+                        
+                        // スタート画面
+                        Spacer()
+                        
+                        VStack(spacing: geo.size.height * 0.02) {
+                            Spacer()
+                            
+                            // スタートボタン
+                            Button(action: {
+                                ButtonSoundPlayer.shared.play(soundName: "click1")
+                                viewModel.startMeasurement()
+                            }) {
+                                Text(languageManager.localizedString(for: "startMeasurement"))
+                                    .font(.custom("Kazesawa-Bold", size: 35))
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .padding()
+                                    .background(Color.red.opacity(0.8))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                            }
+                            .padding(.horizontal)
+
+                            // 設定ボタン
+                            Button(action: {
+                                ButtonSoundPlayer.shared.play(soundName: "click2")
+                                isSettingsPresented = true
+                            }) {
+                                Text(languageManager.localizedString(for: "settings"))
+                                    .font(.custom("Kazesawa-Bold", size: 25))
+                                    .frame(maxWidth: .infinity, minHeight: 30)
+                                    .padding()
+                                    .background(Color.white.opacity(0.8))
+                                    .foregroundColor(.black)
+                                    .cornerRadius(10)
+                            }
+                            .padding(.horizontal)
+                        }
+                        
+                        Button(action: {
+                            ButtonSoundPlayer.shared.play(soundName: "click2")
+                            isUserGuidePresented = true
+                        }) {
+                            Text(languageManager.localizedString(for: "userGuide"))
+                                .font(.custom("Kazesawa-Bold", size: 25))
+                                .frame(maxWidth: .infinity, minHeight: 30)
+                                .padding()
+                                .background(Color.white.opacity(0.8))
+                                .foregroundColor(.black)
+                                .cornerRadius(10)
+                        }
+                        .padding(.horizontal)
+                        
+                        Spacer()
+                        
+                        // AdMobバナー広告（サブスク条件なしで常に表示）
+                        AdBannerView(adUnitID: "ca-app-pub-7266216351091418/9893516864")
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 65)
+                            .padding(.bottom, 0)
+                        
+                    } else {
+                        // 計測中または停止中の画面
+                        VStack(spacing: geo.size.height * 0.02) {
+                            // 上部バナー（常に表示）
+                            AdBannerView(adUnitID: "ca-app-pub-7266216351091418/1706785524")
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 65)
+                                .padding(.bottom, 0)
+                           
+                            // 経過時間表示
+                            Text("\(languageManager.localizedString(for: "elapsedTime")): \(formattedElapsedTime(viewModel.elapsedTime))")
+                                .font(.custom("Kazesawa-Bold", size: 18))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal)
+                            
+                            // グラフ表示
+                            Chart {
+                                ForEach(viewModel.accelerationData, id: \.time) { data in
+                                    LineMark(
+                                        x: .value("時間", data.time),
+                                        y: .value("加速度 (Z軸)", data.z)
+                                    )
+                                    .interpolationMethod(.catmullRom)
+                                    .foregroundStyle(Color.yellow)
+                                }
+                                
+                                // 閾値（赤線）
+                                RuleMark(y: .value("閾値 (正)", viewModel.threshold))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [5]))
+                                    .foregroundStyle(Color.red.opacity(0.7))
+                                
+                                RuleMark(y: .value("閾値 (負)", -viewModel.threshold))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [5]))
+                                    .foregroundStyle(Color.red.opacity(0.7))
+                            }
+                            .chartXScale(domain: getXScaleDomain())
+                            .chartYAxis {
+                                AxisMarks(position: .leading) { _ in
+                                    AxisGridLine().foregroundStyle(.white)
+                                    AxisTick().foregroundStyle(.white)
+                                    AxisValueLabel().foregroundStyle(.white)
+                                }
+                            }
+                            .chartXAxis {
+                                AxisMarks(position: .bottom) { value in
+                                    AxisGridLine().foregroundStyle(.white)
+                                    AxisTick().foregroundStyle(.white)
+                                    if let seconds = value.as(Double.self) {
+                                        let minutes = Int(seconds) / 60
+                                        let secs = Int(seconds) % 60
+                                        AxisValueLabel {
+                                            Text("\(minutes):\(String(format: "%02d", secs))")
+                                                .foregroundColor(.white)
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(height: geo.size.height * 0.3)
+                            .padding(.horizontal, geo.size.width * 0.07)
+                            .clipped()
+                            
+                            // 直近ヒットの表示（そのまま）
+                            if !viewModel.hitTimestamps.isEmpty {
+                                HStack {
+                                    ForEach(viewModel.hitTimestamps.suffix(2), id: \.self) { timestamp in
+                                        Text("⚠️ \(timestamp)")
+                                            .font(.custom("Kazesawa-Bold", size: 14))
+                                            .foregroundColor(.white)
+                                            .multilineTextAlignment(.center)
+                                            .padding(6)
+                                            .background(Color.black.opacity(0.6))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .stroke(Color.white, lineWidth: 1)
+                                            )
+                                    }
+                                }
+                            }
+                            
+                            // 閾値スライダー
+                            VStack(spacing: 8) {
+                                // ラベル（中央）
+                                Text("\(languageManager.localizedString(for: "threshold")): \(viewModel.threshold, specifier: "%.2f")")
+                                    .font(.custom("Kazesawa-Bold", size: 15))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.top, 4)
+
+                                // スライダーと左右ラベル
+                                HStack {
+                                    Text(languageManager.localizedString(for: "thresholdSensitivityHigh"))
+                                        .font(.custom("Kazesawa-Bold", size: 12))
+                                        .foregroundColor(.white)
+
+                                    Slider(value: $viewModel.threshold, in: 0.0...2.0)
+                                        .accentColor(.blue)
+
+                                    Text(languageManager.localizedString(for: "thresholdSensitivityLow"))
+                                        .font(.custom("Kazesawa-Bold", size: 12))
+                                        .foregroundColor(.white)
+                                }
+                            }
+                            .padding(.horizontal)
+                            
+                            // 計測中のボタン群
+                            if viewModel.isMeasuring {
+                                Button(action: {
+                                    ButtonSoundPlayer.shared.play(soundName: "click2")
+                                    viewModel.pauseMeasurement()
+                                }) {
+                                    Text(languageManager.localizedString(for: "pauseMeasurement"))
+                                        .font(.custom("Kazesawa-Bold", size: 30))
+                                        .frame(maxWidth: .infinity, minHeight: 25)
+                                        .padding()
+                                        .background(Color.red)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(10)
+                                }
+                                .padding(.horizontal)
+                                
+                                Button(action: {
+                                    ButtonSoundPlayer.shared.play(soundName: "click2")
+                                    viewModel.startAutoAdjustment()
+                                }) {
+                                    Text(viewModel.isAutoAdjusting
+                                         ? languageManager.localizedString(for: "adjusting")
+                                         : languageManager.localizedString(for: "autoAdjustThreshold"))
+                                        .font(.custom("Kazesawa-Bold", size: 30))
+                                        .frame(maxWidth: .infinity, minHeight: 25)
+                                        .padding()
+                                        .background(viewModel.isAutoAdjusting ? Color.gray : Color.blue)
+                                        .foregroundColor(.white)
+                                        .cornerRadius(10)
+                                }
+                                .disabled(viewModel.isAutoAdjusting)
+                                .padding(.horizontal)
+                                
+                                // 下部バナー（常に表示）
+                                AdBannerView(adUnitID: "ca-app-pub-7266216351091418/9247785079")
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 65)
+                                    .padding(.bottom, 0)
+                            }
+                            
+                            // 停止中のボタン群
+                            if viewModel.isPaused {
+                                VStack(spacing: 10) {
+                                    HStack {
+                                        Button(action: {
+                                            ButtonSoundPlayer.shared.play(soundName: "click2")
+                                            viewModel.resumeMeasurement()
+                                        }) {
+                                            Text(languageManager.localizedString(for: "resumeMeasurement"))
+                                                .font(.custom("Kazesawa-Bold", size: 30))
+                                                .frame(maxWidth: .infinity, minHeight: 44)
+                                                .padding()
+                                                .background(Color.blue)
+                                                .foregroundColor(.white)
+                                                .cornerRadius(10)
+                                        }
+                                        
+                                        Button(action: {
+                                            ButtonSoundPlayer.shared.play(soundName: "click2")
+                                            viewModel.resetMeasurement()
+                                        }) {
+                                            Text(languageManager.localizedString(for: "reset"))
+                                                .font(.custom("Kazesawa-Bold", size: 30))
+                                                .frame(maxWidth: .infinity, minHeight: 44)
+                                                .padding()
+                                                .background(Color.red)
+                                                .foregroundColor(.white)
+                                                .cornerRadius(10)
+                                        }
+                                    }
+                                    .padding(.horizontal)
+                                    
+                                    //（必要ならCSVボタン）
+                                    if viewModel.isFileSaveButtonVisible {
+                                        Button(action: {
+                                            ButtonSoundPlayer.shared.play(soundName: "click1")
+                                            exportCSV()
+                                        }) {
+                                            Text(languageManager.localizedString(for: "exportCSV"))
+                                                .font(.custom("Kazesawa-Bold", size: 30))
+                                                .frame(maxWidth: .infinity, minHeight: 44)
+                                                .padding()
+                                                .background(Color.green)
+                                                .foregroundColor(.white)
+                                                .cornerRadius(10)
+                                        }
+                                        .padding(.horizontal)
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    // 下部バナー（常に表示）
+                                    AdBannerView(adUnitID: "ca-app-pub-7266216351091418/5813852816")
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 65)
+                                        .padding(.bottom, 0)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            .sheet(isPresented: $isSettingsPresented) {
+                SettingsView(viewModel: viewModel)
+                    .environmentObject(languageManager)
+            }
+            .sheet(isPresented: $isUserGuidePresented) {
+                UserGuideView() // PDFを表示
+            }
+            .sheet(isPresented: $isSharing) {
+                if let sharedURL = sharedURL {
+                    ShareSheet(activityItems: [sharedURL])
+                } else {
+                    Text("ファイルが見つかりません")
+                        .font(.custom("Kazesawa-Bold", size: 15))
+                        .foregroundColor(.red)
+                }
+            }
+            // .sheet(isPresented: $isSubscriptionPresented) { ... }  // ← 完全削除
+            
+            .onReceive(NotificationCenter.default.publisher(for: .flashScreen)) { _ in
+                flashOpacity = 1.0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    flashOpacity = 0.0
+                }
+            }
+            .onAppear {
+                requestTrackingPermission()
+            }
+            .alert(isPresented: $viewModel.shouldShowAlert) {
+                Alert(
+                    title: Text(languageManager.localizedString(for: "alert"))
+                        .font(.custom("Kazesawa-Bold", size: 30)),
+                    message: Text(languageManager.localizedString(for: "alertMessage"))
+                        .font(.custom("Kazesawa-Bold", size: 15)),
+                    dismissButton: .default(Text(languageManager.localizedString(for: "ok"))
+                        .font(.custom("Kazesawa-Bold", size: 30)))
+                )
+            }
+        }
+    }
+        
+    // 経過時間をフォーマット
+    func formattedElapsedTime(_ elapsedTime: Double) -> String {
+        let minutes = Int(elapsedTime) / 60
+        let seconds = Int(elapsedTime) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+        
+    // グラフのX軸範囲を計算
+    func getXScaleDomain() -> ClosedRange<Double> {
+        let maxTime = viewModel.elapsedTime
+        let minTime = max(0, maxTime - 300.0)
+        return minTime...maxTime
+    }
+    
+    // AccelerometerView.swift の最後の } の下に追加
+    func requestTrackingPermission() {
+        if #available(iOS 14, *) {
+            ATTrackingManager.requestTrackingAuthorization { status in
+                switch status {
+                case .authorized:
+                    print("✅ トラッキング許可されました")
+                case .denied:
+                    print("❌ トラッキング拒否されました")
+                case .notDetermined:
+                    print("⏳ トラッキング未選択")
+                case .restricted:
+                    print("🚫 トラッキングが制限されています")
+                @unknown default:
+                    break
+                }
+            }
+        }
+    }
+        
+    // CSVエクスポート機能
+    func exportCSV() {
+        let recentData = viewModel.accelerationData.filter { $0.time >= max(viewModel.elapsedTime - 300, 0) }
+        
+        guard !recentData.isEmpty else {
+            print("データがありません。CSVファイルを作成できません。")
+            return
+        }
+        
+        let csvString = "時間,加速度(Z軸)\n" + recentData.map { "\($0.time),\($0.z)" }.joined(separator: "\n")
+        
+        do {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            let fileName = "acceleration_data_\(dateFormatter.string(from: Date())).csv"
+            let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            try csvString.write(to: fileURL, atomically: true, encoding: .utf8)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.sharedURL = fileURL
+                self.isSharing = true
+            }
+        } catch {
+            print("CSVファイルの書き込みに失敗しました: \(error)")
+        }
+    }
+}
